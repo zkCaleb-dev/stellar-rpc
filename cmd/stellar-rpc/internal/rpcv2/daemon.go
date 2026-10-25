@@ -31,6 +31,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/subscriptions"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
@@ -287,7 +288,13 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		adminAddr = addr
 	}
 	serveReads := opts.ServeReads
+	var subsManager *subscriptions.Manager
 	if serveReads == nil {
+		// PROTOTYPE: event subscriptions at /ws on the read endpoint. The
+		// manager is wired twice — here into the serving mux, and below as the
+		// ingestion loop's LedgerCommitted tap — and only for the production
+		// server (an injected ServeReads keeps its own surface).
+		subsManager = subscriptions.NewManager(logger)
 		serveReads = newServeReads(cfg, handlerParams{
 			daemon:            coreDaemon,
 			logger:            logger,
@@ -296,7 +303,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 			feeWindows:        feeWindows,
 			networkPassphrase: core.networkPassphrase,
 			retentionWindow:   retention.RetentionWindow(),
-		})
+		}, subsManager)
 	}
 
 	// --- Assemble the StartConfig and run the daemon body once. ---
@@ -307,6 +314,9 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		start.lifecycleGrace = deriveLifecycleGrace(cfg.Service)
 	}
 	start.FeeWindows = feeWindows
+	if subsManager != nil {
+		start.LedgerCommitted = subsManager.Notify
+	}
 	if opts.OnListen != nil {
 		onListen := opts.OnListen
 		start.OnListen = func(rpc net.Addr) { onListen(rpc, adminAddr) }

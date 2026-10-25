@@ -36,6 +36,16 @@ func NewV1Handler(limits Limits, logger *supportlog.Entry) jrpc2.Handler {
 		})
 }
 
+// GetEventsV1 serves one v1 getEvents request in-process for callers that
+// already planted a read view on ctx (query.WithView) — the subscriptions
+// fan-out. It is the handler behind NewV1Handler minus the jrpc2 envelope, so
+// in-process callers and the endpoint cannot drift.
+func GetEventsV1(
+	ctx context.Context, limits Limits, logger *supportlog.Entry, req *protocol.GetEventsRequest,
+) (protocol.GetEventsResponse, error) {
+	return getEventsV1(ctx, limits, logger, req)
+}
+
 //nolint:cyclop // the v1 handler's validation order, kept in one place like the original
 func getEventsV1(
 	ctx context.Context, limits Limits, logger *supportlog.Entry, req *protocol.GetEventsRequest,

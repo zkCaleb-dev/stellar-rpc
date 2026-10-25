@@ -37,7 +37,7 @@ func TestServeReads_ServesAndDrainsOnCancel(t *testing.T) {
 		feeWindows:        feewindow.NewFeeWindows(10, 10),
 		networkPassphrase: "test passphrase",
 		retentionWindow:   1,
-	})
+	}, nil)
 
 	var lc net.ListenConfig
 	listener, err := lc.Listen(context.Background(), "tcp", cfg.Service.Endpoint)

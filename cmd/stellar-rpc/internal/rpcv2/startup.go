@@ -173,6 +173,15 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// returns. runBody is the one clean-vs-crash decision point; a canceled
 	// parent ctx classifies as clean.
 	g, gctx := errgroup.WithContext(ctx)
+	// The loop's serving sink: the registry, optionally tapped so each fully
+	// committed ledger also wakes the subscriptions fan-out. The tap sits on
+	// SetLatestLedger — the exact point after which a read view can serve the
+	// ledger from every hot store — and must not block (LedgerCommitted's
+	// contract), so the ingestion hot path is unchanged.
+	var ingestSink handleSink = registry
+	if cfg.LedgerCommitted != nil {
+		ingestSink = committedTap{handleSink: registry, committed: cfg.LedgerCommitted}
+	}
 	// The loop's deferred close now owns hotDB; g.Wait joins it before run returns.
 	loopOwnsDB = true
 	g.Go(func() error {
@@ -185,7 +194,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Logger:     logger,
 			Metrics:    metrics,
 			Sink:       cfg.Exec.Process.Sink,
-			Registry:   registry,
+			Registry:   ingestSink,
 			FeeWindows: cfg.FeeWindows,
 		})
 		if err == nil {
@@ -445,6 +454,25 @@ type StartConfig struct {
 	// once, before the daemon body; nil (tests without a fee consumer)
 	// means the loop never computes fees.
 	FeeWindows *feewindow.FeeWindows
+
+	// LedgerCommitted, when set, is called after each ledger becomes fully
+	// queryable (the point the registry's latest-ledger stamp advances). It
+	// runs on the ingestion loop's goroutine and MUST NOT block — the
+	// subscriptions manager's Notify (an atomic store plus a non-blocking
+	// wake) is the intended callee. Optional.
+	LedgerCommitted func(seq uint32)
+}
+
+// committedTap decorates the ingestion loop's handleSink so every
+// SetLatestLedger also notifies LedgerCommitted, without the loop knowing.
+type committedTap struct {
+	handleSink
+	committed func(seq uint32)
+}
+
+func (t committedTap) SetLatestLedger(seq uint32, closeTime query.CloseTime) {
+	t.handleSink.SetLatestLedger(seq, closeTime)
+	t.committed(seq)
 }
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The

@@ -10,11 +10,14 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/subscriptions"
 )
 
 // readShutdownTimeout bounds the graceful drain at shutdown; whatever is
@@ -24,14 +27,26 @@ const readShutdownTimeout = 5 * time.Second
 // newServeReads returns the production ServeReads — the method table over the
 // registry, served on run()'s bound listener; the contract lives on
 // StartConfig.ServeReads. params carries the handler inputs; the registry and
-// the two readers are filled here.
+// the two readers are filled here. subs, when non-nil, is bound to this run's
+// registry and served at /ws (PROTOTYPE: event subscriptions); its fan-out
+// worker shares the serve context, so it drains with the endpoint.
 func newServeReads(
-	cfg config.Config, params handlerParams,
+	cfg config.Config, params handlerParams, subs *subscriptions.Manager,
 ) func(context.Context, *query.Registry, net.Listener) error {
 	return func(ctx context.Context, reg *query.Registry, listener net.Listener) error {
 		handler := newJSONRPCHandler(cfg, params.withRegistry(reg))
+		var root http.Handler = handler
+		if subs != nil {
+			subs.Bind(newEventsSource(cfg, reg, params.logger),
+				deref(cfg.Service.Methods.GetEvents.MaxItemsPerResponse))
+			go subs.Run(ctx)
+			mux := http.NewServeMux()
+			mux.Handle("/ws", subs.HTTPHandler())
+			mux.Handle("/", handler)
+			root = mux
+		}
 		server := &http.Server{
-			Handler:     handler,
+			Handler:     root,
 			ReadTimeout: jsonrpc.DefaultHTTPReadTimeout,
 			IdleTimeout: jsonrpc.DefaultHTTPIdleTimeout,
 		}
@@ -60,6 +75,27 @@ func newServeReads(
 			<-died // ErrServerClosed, by construction
 			return ctx.Err()
 		}
+	}
+}
+
+// newEventsSource is the subscriptions manager's read path: one fresh read
+// view per poll (the subscription analogue of wrapAdapterRequest), then the
+// native v1 getEvents, so push delivery and the endpoint share one
+// implementation, limits included.
+func newEventsSource(
+	cfg config.Config, reg *query.Registry, logger *supportlog.Entry,
+) subscriptions.GetEvents {
+	limits := eventsapi.Limits{
+		MaxLimit:     deref(cfg.Service.Methods.GetEvents.MaxItemsPerResponse),
+		DefaultLimit: deref(cfg.Service.Methods.GetEvents.DefaultItemsPerResponse),
+	}
+	return func(ctx context.Context, req protocol.GetEventsRequest) (protocol.GetEventsResponse, error) {
+		view, err := reg.NewReadView()
+		if err != nil {
+			return protocol.GetEventsResponse{}, err
+		}
+		defer view.Release()
+		return eventsapi.GetEventsV1(query.WithView(ctx, view), limits, logger, &req)
 	}
 }
 
